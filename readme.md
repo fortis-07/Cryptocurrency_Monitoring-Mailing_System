@@ -6,16 +6,21 @@ This serverless application monitors cryptocurrency-to-fiat exchange rates in re
 
 ## Architecture Diagram
 
-```
+```mermaid
 graph TD
-  A[CloudWatch Events] -->|Scheduled Trigger| B[Lambda]
-  B -->|Fetch Rates| C[Alpha Vantage API]
-  B -->|Read/Write| D[DynamoDB]
-  B -->|Publish Alerts| E[SNS]
-  E -->|Deliver| F[Email/SMS]
-  B -->|Log Metrics| G[CloudWatch Logs]
-
+  A[CloudWatch Events<br><small>5-minute Schedule</small>] -->|Triggers| B[AWS Lambda<br><small>Python 3.9</small>]
+  B -->|API Call| C{{Alpha Vantage API}}
+  B -->|Read/Write| D[(Amazon DynamoDB<br><small>Exchange Rates</small>)]
+  B -->|Publish| E[[Amazon SNS]]
+  E -->|Send| F[📧 Email]
+  B -->|Logs| H((CloudWatch<br>Logs))
+  
+  style A fill:#FFA07A,stroke:#333
+  style B fill:#6505ED,stroke:#333
+  style D fill:#765FB98,stroke:#333
+  style E fill:#FFD870,stroke:#333
 ```
+
 
 ## Key Relationships:
 
