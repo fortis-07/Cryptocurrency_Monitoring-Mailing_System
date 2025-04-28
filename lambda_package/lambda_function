@@ -1,0 +1,123 @@
+import os
+import json
+import requests
+import boto3
+from datetime import datetime
+from decimal import Decimal  # Add this import
+
+# Initialize clients
+sns = boto3.client('sns')
+dynamodb = boto3.resource('dynamodb')
+
+def fetch_exchange_rate(from_currency, to_currency, api_key):
+    """Fetch real-time exchange rate from Alpha Vantage"""
+    url = 'https://www.alphavantage.co/query'
+    params = {
+        'function': 'CURRENCY_EXCHANGE_RATE',
+        'from_currency': from_currency,
+        'to_currency': to_currency,
+        'apikey': api_key
+    }
+    
+    try:
+        response = requests.get(url, params=params)
+        data = response.json()
+        rate_data = data.get('Realtime Currency Exchange Rate', {})
+        
+        # Convert to Decimal for DynamoDB
+        exchange_rate = rate_data.get('5. Exchange Rate', '0')
+        return {
+            'from_currency': from_currency,
+            'to_currency': to_currency,
+            'rate': Decimal(exchange_rate),
+            'timestamp': rate_data.get('6. Last Refreshed', ''),
+            'last_refreshed': rate_data.get('6. Last Refreshed', '')
+        }
+    except Exception as e:
+        print(f"Error fetching {from_currency} rate: {str(e)}")
+        return None
+
+def lambda_handler(event, context):
+    api_key = os.environ['ALPHA_VANTAGE_API_KEY']
+    sns_topic_arn = os.environ['SNS_TOPIC_ARN']
+    crypto_symbols = os.environ['CRYPTO_SYMBOLS'].split(',')
+    fiat_currency = os.environ.get('FIAT_CURRENCY', 'USD')
+    threshold = Decimal(os.environ.get('PRICE_CHANGE_THRESHOLD', '0.1'))
+    
+    table = dynamodb.Table(os.environ['DYNAMODB_TABLE'])
+    alerts = []
+    
+    for symbol in crypto_symbols:
+        current_rate = fetch_exchange_rate(symbol, fiat_currency, api_key)
+        if not current_rate or not current_rate['rate']:
+            continue
+        
+        try:
+            response = table.get_item(Key={
+                'from_currency': symbol,
+                'to_currency': fiat_currency
+            })
+            previous_rate = response.get('Item', None)
+        except Exception as e:
+            print(f"DynamoDB read error: {str(e)}")
+            previous_rate = None
+        
+        current_value = current_rate['rate']
+        previous_value = previous_rate['rate'] if previous_rate else current_value
+        
+        # Calculate percentage change using Decimal
+        percent_change = Decimal('0.0')
+        if previous_value != Decimal('0'):
+            percent_change = ((current_value - previous_value) / previous_value) * Decimal('100')
+        
+        # Store with Decimal values
+        table.put_item(Item={
+            'from_currency': symbol,
+            'to_currency': fiat_currency,
+            'rate': current_value,
+            'timestamp': current_rate['timestamp'],
+            'last_refreshed': current_rate['last_refreshed'],
+            'previous_rate': previous_value,
+            'percent_change': percent_change
+        })
+        
+        if abs(percent_change) >= threshold:
+            alerts.append({
+                'symbol': symbol,
+                'to_currency': fiat_currency,
+                'rate': float(current_value),  # Convert to float for JSON serialization
+                'previous_rate': float(previous_value),
+                'percent_change': float(percent_change),
+                'timestamp': current_rate['timestamp']
+            })
+    
+    if alerts:
+        message = "Crypto Exchange Rate Alerts:\n\n"
+        message += f"Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
+        message += f"Base Currency: {fiat_currency}\n\n"
+        
+        for alert in alerts:
+            direction = "↑" if alert['percent_change'] > 0 else "↓"
+            message += (
+                f"{alert['symbol']}/{alert['to_currency']}: {alert['rate']:.4f} "
+                f"({direction}{abs(alert['percent_change']):.2f}%)\n"
+                f"Previous: {alert['previous_rate']:.4f}\n\n"
+            )
+        
+        try:
+            sns.publish(
+                TopicArn=sns_topic_arn,
+                Message=message,
+                Subject=f"Crypto Exchange Rate Alert - {fiat_currency}"
+            )
+        except Exception as e:
+            print(f"SNS publish error: {str(e)}")
+    
+    return {
+        'statusCode': 200,
+        'body': json.dumps({
+            'processed': len(crypto_symbols),
+            'alerts': len(alerts),
+            'fiat_currency': fiat_currency
+        })
+    }
